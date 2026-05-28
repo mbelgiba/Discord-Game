@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XO Arena — Крестики-нолики онлайн</title>
+    <meta name="description" content="Онлайн игра крестики-нолики с другом. Регистрируйся, приглашай друзей и играй в реальном времени!">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===== ЭКРАН АВТОРИЗАЦИИ ===== -->
+<div id="auth-screen">
+    <div class="auth-bg-orb orb1"></div>
+    <div class="auth-bg-orb orb2"></div>
+    <div class="auth-bg-orb orb3"></div>
+
+    <div class="auth-box glass-panel">
+        <div class="auth-logo">
+            <span class="logo-x">X</span><span class="logo-o">O</span>
+            <span class="logo-text">Arena</span>
+        </div>
+        <p class="auth-subtitle">Играй с друзьями онлайн</p>
+
+        <div class="auth-tabs">
+            <button class="auth-tab active" id="tab-login">Войти</button>
+            <button class="auth-tab" id="tab-register">Регистрация</button>
+        </div>
+
+        <div class="auth-form">
+            <div class="input-group">
+                <span class="input-icon">👤</span>
+                <input type="text" id="auth-username" placeholder="Имя пользователя" autocomplete="username">
+            </div>
+            <div class="input-group">
+                <span class="input-icon">🔑</span>
+                <input type="password" id="auth-password" placeholder="Пароль" autocomplete="current-password">
+            </div>
+            <button id="auth-submit-btn" class="primary-btn glow-btn">Войти</button>
+            <p id="auth-error" class="error-msg"></p>
+        </div>
+    </div>
+</div>
+
+<!-- ===== МОДАЛЬНОЕ ОКНО ПРОФИЛЯ ===== -->
+<div id="profile-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-content glass-panel">
+        <header class="modal-header">
+            <h2>⚙️ Мой профиль</h2>
+            <button id="close-profile-btn" class="icon-btn">✕</button>
+        </header>
+        <div class="modal-body">
+            <div class="profile-avatar-large" id="modal-avatar-badge">X</div>
+            <h3 id="modal-username-display">User#0000</h3>
+            <div class="stats-row">
+                <div class="stat-pill wins">🏆 <span id="stat-wins">0</span></div>
+                <div class="stat-pill losses">💀 <span id="stat-losses">0</span></div>
+                <div class="stat-pill draws">🤝 <span id="stat-draws">0</span></div>
+            </div>
+            <label>О себе:</label>
+            <textarea id="profile-bio-input" placeholder="Расскажите немного о себе..."></textarea>
+            <button id="save-profile-btn" class="primary-btn">Сохранить</button>
+            <p id="profile-msg" class="success-msg"></p>
+        </div>
+    </div>
+</div>
+
+<!-- ===== МОДАЛЬНОЕ ОКНО ПРИГЛАШЕНИЯ В ИГРУ ===== -->
+<div id="invite-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-content glass-panel invite-modal-content">
+        <div class="invite-icon">🎮</div>
+        <h2 id="invite-title">Приглашение в игру!</h2>
+        <p id="invite-text">Хочет сыграть с тобой</p>
+        <div class="invite-buttons">
+            <button id="invite-accept-btn" class="primary-btn glow-btn">✅ Принять</button>
+            <button id="invite-decline-btn" class="secondary-btn">❌ Отказать</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== УВЕДОМЛЕНИЕ (ТОСТ) ===== -->
+<div id="toast-container"></div>
+
+<!-- ===== ОСНОВНОЕ ПРИЛОЖЕНИЕ ===== -->
+<div id="app-container" style="display: none;">
+
+    <!-- САЙДБАР -->
+    <nav class="sidebar glass-panel">
+        <div class="sidebar-top">
+            <div class="profile-section" id="open-profile-btn" title="Открыть профиль">
+                <div class="avatar-small" id="sidebar-avatar">?</div>
+                <div class="profile-info">
+                    <span id="my-username">Загрузка...</span>
+                    <span class="profile-hint">⚙️ Профиль</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar-section">
+            <div class="section-title">Каналы</div>
+            <ul class="nav-list">
+                <li class="nav-item active" id="nav-chat" data-view="chat">💬 Общий чат</li>
+            </ul>
+        </div>
+
+        <div class="sidebar-section">
+            <div class="section-title">Друзья</div>
+            <div class="friend-add-row">
+                <input type="text" id="friend-search-input" placeholder="Имя#Тег">
+                <button id="add-friend-btn" class="icon-action-btn" title="Добавить">+</button>
+            </div>
+            <p id="friend-error" class="error-msg"></p>
+            <ul id="friends-list" class="nav-list friends-list"></ul>
+        </div>
+
+        <div class="sidebar-bottom">
+            <button id="logout-btn" class="logout-btn">🚪 Выйти</button>
+        </div>
+    </nav>
+
+    <!-- ОСНОВНАЯ ОБЛАСТЬ — ЧАТ -->
+    <main class="main-area" id="view-chat">
+        <header class="area-header glass-panel">
+            <div class="header-left">
+                <span class="header-icon">💬</span>
+                <h2>Общий чат</h2>
+            </div>
+            <div class="header-right">
+                <span class="online-badge" id="online-count">0 онлайн</span>
+            </div>
+        </header>
+
+        <div class="messages" id="messages-container">
+            <div class="message system">
+                <span>👋 Добро пожаловать в <strong>XO Arena</strong>! Чтобы сыграть с другом — нажми 🎮 напротив его имени в списке справа.</span>
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typing-indicator"></div>
+
+        <div class="message-input-area glass-panel">
+            <input type="text" id="message-input" placeholder="Написать сообщение... (Enter для отправки)">
+            <button id="send-btn" class="send-btn" title="Отправить">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+            </button>
+        </div>
+    </main>
+
+    <!-- ОСНОВНАЯ ОБЛАСТЬ — ИГРА -->
+    <main class="main-area" id="view-game" style="display: none;">
+        <header class="area-header glass-panel">
+            <div class="header-left">
+                <span class="header-icon">🎮</span>
+                <h2>Игровая зона</h2>
+            </div>
+            <div class="header-right">
+                <button id="leave-game-btn" class="secondary-btn small-btn">← В чат</button>
+            </div>
+        </header>
+
+        <!-- Лобби (ожидание игры) -->
+        <div class="game-lobby" id="game-lobby">
+            <div class="lobby-icon">🎮</div>
+            <h2>Готов к игре?</h2>
+            <p>Нажми кнопку <strong>🎮</strong> напротив имени онлайн-игрока, чтобы пригласить его на партию</p>
+            <div class="lobby-pulse"></div>
+        </div>
+
+        <!-- Активная игра -->
+        <div class="game-active" id="game-active" style="display: none;">
+            <div class="game-info-bar">
+                <div class="player-card" id="player-me-card">
+                    <div class="player-symbol" id="my-symbol-badge">X</div>
+                    <span id="player-me-name">Я</span>
+                </div>
+                <div class="vs-divider">VS</div>
+                <div class="player-card" id="player-opp-card">
+                    <div class="player-symbol" id="opp-symbol-badge">O</div>
+                    <span id="player-opp-name">Соперник</span>
+                </div>
+            </div>
+
+            <div class="game-status-banner" id="game-status-banner">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="game-status-text">Ожидание...</span>
+            </div>
+
+            <div class="tic-tac-toe-board" id="board">
+                <div class="cell" data-index="0"></div>
+                <div class="cell" data-index="1"></div>
+                <div class="cell" data-index="2"></div>
+                <div class="cell" data-index="3"></div>
+                <div class="cell" data-index="4"></div>
+                <div class="cell" data-index="5"></div>
+                <div class="cell" data-index="6"></div>
+                <div class="cell" data-index="7"></div>
+                <div class="cell" data-index="8"></div>
+            </div>
+
+            <div class="game-actions" id="game-actions" style="display: none;">
+                <button id="rematch-btn" class="primary-btn glow-btn">🔄 Реванш</button>
+                <button id="game-back-btn" class="secondary-btn">🏠 Выйти</button>
+            </div>
+        </div>
+    </main>
+
+    <!-- ПРАВАЯ ПАНЕЛЬ -->
+    <aside class="user-list glass-panel">
+        <div class="section-title">В сети</div>
+        <ul id="online-users" class="status-list"></ul>
+        <div class="section-title" style="margin-top: 20px;">Не в сети</div>
+        <ul id="offline-users" class="status-list"></ul>
+    </aside>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
