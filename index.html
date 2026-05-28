@@ -80,6 +80,40 @@
     </div>
 </div>
 
+<!-- ===== МОДАЛЬНОЕ ОКНО ВХОДЯЩЕГО ЗВОНКА ===== -->
+<div id="call-incoming-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-content glass-panel invite-modal-content call-modal-content">
+        <div class="call-incoming-animation">
+            <div class="call-ring ring1"></div>
+            <div class="call-ring ring2"></div>
+            <div class="call-ring ring3"></div>
+            <div class="call-avatar-incoming">📞</div>
+        </div>
+        <h2 id="call-incoming-title">Входящий звонок</h2>
+        <p id="call-incoming-text">Кто-то звонит вам...</p>
+        <div class="invite-buttons">
+            <button id="call-accept-btn" class="primary-btn glow-btn call-accept-btn">📞 Принять</button>
+            <button id="call-decline-btn" class="secondary-btn call-decline-btn-style">❌ Отклонить</button>
+        </div>
+    </div>
+</div>
+
+<!-- ===== GIF ПОИСК МОДАЛКА ===== -->
+<div id="gif-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-content glass-panel gif-modal-content">
+        <header class="modal-header">
+            <h2>🎬 Выбрать GIF</h2>
+            <button id="close-gif-btn" class="icon-btn">✕</button>
+        </header>
+        <div class="gif-search-bar">
+            <input type="text" id="gif-search-input" placeholder="Поиск GIF...">
+        </div>
+        <div class="gif-results" id="gif-results">
+            <div class="gif-placeholder">Введите запрос для поиска GIF</div>
+        </div>
+    </div>
+</div>
+
 <!-- ===== УВЕДОМЛЕНИЕ (ТОСТ) ===== -->
 <div id="toast-container"></div>
 
@@ -105,8 +139,8 @@
             </ul>
         </div>
 
-        <div class="sidebar-section">
-            <div class="section-title">Друзья</div>
+        <div class="sidebar-section sidebar-friends-section">
+            <div class="section-title">Друзья <span class="dm-hint">(нажми для ЛС)</span></div>
             <div class="friend-add-row">
                 <input type="text" id="friend-search-input" placeholder="Имя#Тег">
                 <button id="add-friend-btn" class="icon-action-btn" title="Добавить">+</button>
@@ -120,7 +154,7 @@
         </div>
     </nav>
 
-    <!-- ОСНОВНАЯ ОБЛАСТЬ — ЧАТ -->
+    <!-- ОСНОВНАЯ ОБЛАСТЬ — ОБЩИЙ ЧАТ -->
     <main class="main-area" id="view-chat">
         <header class="area-header glass-panel">
             <div class="header-left">
@@ -134,7 +168,7 @@
 
         <div class="messages" id="messages-container">
             <div class="message system">
-                <span>👋 Добро пожаловать в <strong>XO Arena</strong>! Чтобы сыграть с другом — нажми 🎮 напротив его имени в списке справа.</span>
+                <span>👋 Добро пожаловать в <strong>XO Arena</strong>! Чтобы сыграть с другом — нажми 🎮 напротив его имени в списке справа. Для приватного чата — нажми на друга в сайдбаре.</span>
             </div>
         </div>
 
@@ -150,6 +184,68 @@
             </button>
         </div>
     </main>
+
+    <!-- ОСНОВНАЯ ОБЛАСТЬ — ПРИВАТНЫЙ ЧАТ -->
+    <main class="main-area" id="view-dm" style="display: none;">
+        <header class="area-header glass-panel">
+            <div class="header-left">
+                <button id="dm-back-btn" class="icon-btn dm-back-btn" title="Назад">←</button>
+                <span class="header-icon">🔒</span>
+                <h2 id="dm-partner-name">Приватный чат</h2>
+            </div>
+            <div class="header-right dm-actions">
+                <button id="dm-call-audio-btn" class="icon-action-btn-small" title="Аудиозвонок">📞</button>
+                <button id="dm-call-video-btn" class="icon-action-btn-small" title="Видеозвонок">📹</button>
+            </div>
+        </header>
+
+        <div class="messages" id="dm-messages-container"></div>
+
+        <div class="typing-indicator" id="dm-typing-indicator"></div>
+
+        <div class="message-input-area glass-panel dm-input-area">
+            <button id="dm-gif-btn" class="media-btn" title="Отправить GIF">🎬</button>
+            <button id="dm-voice-btn" class="media-btn" title="Голосовое сообщение">🎤</button>
+            <input type="text" id="dm-message-input" placeholder="Написать сообщение...">
+            <button id="dm-send-btn" class="send-btn" title="Отправить">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+            </button>
+        </div>
+
+        <!-- Индикатор записи голосового -->
+        <div id="voice-recording-bar" class="voice-recording-bar" style="display:none;">
+            <div class="recording-pulse"></div>
+            <span id="voice-timer">0:00</span>
+            <button id="voice-cancel-btn" class="secondary-btn small-btn">❌ Отмена</button>
+            <button id="voice-send-btn" class="primary-btn small-btn">📤 Отправить</button>
+        </div>
+    </main>
+
+    <!-- АКТИВНЫЙ ЗВОНОК -->
+    <div id="call-overlay" class="call-overlay" style="display: none;">
+        <div class="call-container glass-panel">
+            <div class="call-header">
+                <h3 id="call-partner-name">Звонок</h3>
+                <span id="call-timer" class="call-timer">00:00</span>
+            </div>
+            <div class="call-media-area">
+                <video id="remote-video" autoplay playsinline></video>
+                <video id="local-video" autoplay playsinline muted></video>
+                <div id="call-audio-avatar" class="call-audio-avatar">
+                    <div class="call-avatar-pulse"></div>
+                    <span>🎵</span>
+                </div>
+            </div>
+            <div class="call-controls">
+                <button id="call-toggle-mic" class="call-control-btn active" title="Микрофон">🎤</button>
+                <button id="call-toggle-camera" class="call-control-btn" title="Камера">📹</button>
+                <button id="call-end-btn" class="call-control-btn end-call" title="Завершить">📵</button>
+            </div>
+        </div>
+    </div>
 
     <!-- ОСНОВНАЯ ОБЛАСТЬ — ИГРА -->
     <main class="main-area" id="view-game" style="display: none;">

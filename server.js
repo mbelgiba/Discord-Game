@@ -8,7 +8,7 @@ const path = require('path');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
 
 // Инициализация БД
@@ -35,6 +35,16 @@ db.serialize(() => {
         user_id INTEGER,
         friend_id INTEGER,
         PRIMARY KEY (user_id, friend_id)
+    )`);
+
+    // Таблица приватных сообщений
+    db.run(`CREATE TABLE IF NOT EXISTS private_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_id INTEGER,
+        receiver_id INTEGER,
+        content TEXT,
+        msg_type TEXT DEFAULT 'text',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
     // Добавляем колонки статистики если их нет (миграция)
@@ -110,12 +120,14 @@ app.post('/api/friends/add', (req, res) => {
 
         db.run(`INSERT INTO friends (user_id, friend_id) VALUES (?, ?)`, [myId, friend.id], (err2) => {
             if (err2) return res.status(400).json({ error: 'Уже в друзьях' });
-            res.json({ success: true, friend: { username: friendName, tag: friendTag } });
+            // Добавляем взаимно
+            db.run(`INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)`, [friend.id, myId]);
+            res.json({ success: true, friend: { id: friend.id, username: friendName, tag: friendTag } });
         });
     });
 });
 
-// Найти пользователя по имени и тегу (для приглашений в игру)
+// Найти пользователя по имени и тегу
 app.get('/api/user/find', (req, res) => {
     const { username, tag } = req.query;
     if (!username || !tag) return res.status(400).json({ error: 'Нужны username и tag' });
@@ -136,6 +148,25 @@ app.get('/api/friends/:id', (req, res) => {
     db.all(query, [req.params.id], (err, friends) => {
         if (err) return res.status(500).json({ error: 'Ошибка БД' });
         res.json(friends || []);
+    });
+});
+
+// Получить историю приватных сообщений
+app.get('/api/messages/:userId/:friendId', (req, res) => {
+    const { userId, friendId } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+    const query = `
+        SELECT pm.*, u.username, u.tag 
+        FROM private_messages pm
+        JOIN users u ON u.id = pm.sender_id
+        WHERE (pm.sender_id = ? AND pm.receiver_id = ?) 
+           OR (pm.sender_id = ? AND pm.receiver_id = ?)
+        ORDER BY pm.created_at ASC
+        LIMIT ?
+    `;
+    db.all(query, [userId, friendId, friendId, userId, limit], (err, messages) => {
+        if (err) return res.status(500).json({ error: 'Ошибка БД' });
+        res.json(messages || []);
     });
 });
 
@@ -173,7 +204,7 @@ function createRoom(player1Id, player2Id) {
         id: roomId,
         players: [player1Id, player2Id],
         board: Array(9).fill(''),
-        currentTurn: player1Id, // первый игрок ходит первым (X)
+        currentTurn: player1Id,
         active: true,
         symbols: { [player1Id]: 'X', [player2Id]: 'O' }
     };
@@ -222,7 +253,7 @@ wss.on('connection', (ws, req) => {
         if (!sender) return;
 
         switch (data.type) {
-            // --- ЧАТ ---
+            // --- ОБЩИЙ ЧАТ ---
             case 'message': {
                 const broadcastData = JSON.stringify({ type: 'message', user: sender.full, text: data.text, userId: id });
                 onlineUsers.forEach(client => {
@@ -239,9 +270,114 @@ wss.on('connection', (ws, req) => {
                 break;
             }
 
+            // --- ПРИВАТНЫЕ СООБЩЕНИЯ ---
+            case 'private_message': {
+                const { targetId, content, msgType } = data;
+                // msgType: 'text', 'voice', 'gif'
+                
+                // Сохраняем в БД
+                db.run(
+                    `INSERT INTO private_messages (sender_id, receiver_id, content, msg_type) VALUES (?, ?, ?, ?)`,
+                    [parseInt(id), parseInt(targetId), content, msgType || 'text'],
+                    function(err) {
+                        if (err) { send(ws, { type: 'error', msg: 'Ошибка отправки сообщения' }); return; }
+                        
+                        const msgPayload = {
+                            type: 'private_message',
+                            id: this.lastID,
+                            senderId: id,
+                            senderName: sender.full,
+                            receiverId: targetId,
+                            content,
+                            msgType: msgType || 'text',
+                            createdAt: new Date().toISOString()
+                        };
+                        
+                        // Отправляем обоим
+                        send(ws, msgPayload);
+                        const target = onlineUsers.get(String(targetId));
+                        if (target) send(target.ws, msgPayload);
+                    }
+                );
+                break;
+            }
+
+            case 'private_typing':
+            case 'private_stop_typing': {
+                const target = onlineUsers.get(String(data.targetId));
+                if (target) {
+                    send(target.ws, { 
+                        type: data.type, 
+                        senderId: id, 
+                        senderName: sender.full 
+                    });
+                }
+                break;
+            }
+
+            // --- ЗВОНКИ (WebRTC сигнализация) ---
+            case 'call_offer': {
+                const target = onlineUsers.get(String(data.targetId));
+                if (!target) { send(ws, { type: 'call_error', msg: 'Пользователь не в сети' }); break; }
+                send(target.ws, {
+                    type: 'call_offer',
+                    fromId: id,
+                    fromName: sender.full,
+                    offer: data.offer,
+                    callType: data.callType // 'audio' или 'video'
+                });
+                break;
+            }
+
+            case 'call_answer': {
+                const target = onlineUsers.get(String(data.targetId));
+                if (target) {
+                    send(target.ws, {
+                        type: 'call_answer',
+                        fromId: id,
+                        answer: data.answer
+                    });
+                }
+                break;
+            }
+
+            case 'call_ice_candidate': {
+                const target = onlineUsers.get(String(data.targetId));
+                if (target) {
+                    send(target.ws, {
+                        type: 'call_ice_candidate',
+                        fromId: id,
+                        candidate: data.candidate
+                    });
+                }
+                break;
+            }
+
+            case 'call_decline': {
+                const target = onlineUsers.get(String(data.targetId));
+                if (target) {
+                    send(target.ws, {
+                        type: 'call_declined',
+                        fromId: id,
+                        fromName: sender.full
+                    });
+                }
+                break;
+            }
+
+            case 'call_end': {
+                const target = onlineUsers.get(String(data.targetId));
+                if (target) {
+                    send(target.ws, {
+                        type: 'call_ended',
+                        fromId: id
+                    });
+                }
+                break;
+            }
+
             // --- ИГРОВЫЕ ПРИГЛАШЕНИЯ ---
             case 'game_invite': {
-                // data.targetId — кого приглашаем
                 const target = onlineUsers.get(String(data.targetId));
                 if (!target) { send(ws, { type: 'game_error', msg: 'Игрок не в сети' }); break; }
                 if (target.currentRoom) { send(ws, { type: 'game_error', msg: 'Игрок уже в игре' }); break; }
@@ -256,13 +392,11 @@ wss.on('connection', (ws, req) => {
             }
 
             case 'game_invite_accept': {
-                // data.fromId — кто приглашал
                 const inviter = onlineUsers.get(String(data.fromId));
                 if (!inviter) { send(ws, { type: 'game_error', msg: 'Игрок вышел' }); break; }
 
                 const room = createRoom(data.fromId, id);
 
-                // Обновляем текущую комнату для обоих
                 onlineUsers.get(String(data.fromId)).currentRoom = room.id;
                 sender.currentRoom = room.id;
 
@@ -298,19 +432,18 @@ wss.on('connection', (ws, req) => {
                 room.board[cellIdx] = room.symbols[id];
                 const result = checkWinner(room.board);
 
-                // Следующий ход
                 const otherPlayerId = room.players.find(p => p !== id);
                 room.currentTurn = otherPlayerId;
 
                 const movePayload = {
                     type: 'game_update',
+                    roomId: room.id,
                     board: room.board,
                     lastMove: cellIdx,
                     currentTurn: room.currentTurn,
                     result: result
                 };
 
-                // Рассылаем обоим игрокам
                 room.players.forEach(pid => {
                     const p = onlineUsers.get(String(pid));
                     if (p) send(p.ws, { ...movePayload, yourTurn: room.currentTurn === pid });
@@ -325,11 +458,7 @@ wss.on('connection', (ws, req) => {
                     
                     updateStats(winnerId, loserId, result.winner === 'draw', room.players);
 
-                    // Очищаем комнаты
-                    room.players.forEach(pid => {
-                        const p = onlineUsers.get(String(pid));
-                        if (p) p.currentRoom = null;
-                    });
+                    // НЕ удаляем комнату и НЕ обнуляем currentRoom — нужно для реванша
                 }
                 break;
             }
@@ -345,15 +474,19 @@ wss.on('connection', (ws, req) => {
             }
 
             case 'game_rematch_accept': {
-                // Создаём новую комнату для тех же игроков, меняем символы
                 const oldRoom = gameRooms.get(data.roomId);
                 if (!oldRoom) break;
 
                 const [p1, p2] = oldRoom.players;
-                const room = createRoom(p2, p1); // Меняем порядок — теперь второй игрок ходит первым
+                // Очищаем старую комнату
+                gameRooms.delete(data.roomId);
 
-                onlineUsers.get(String(p1)).currentRoom = room.id;
-                onlineUsers.get(String(p2)).currentRoom = room.id;
+                const room = createRoom(p2, p1);
+
+                const p1User = onlineUsers.get(String(p1));
+                const p2User = onlineUsers.get(String(p2));
+                if (p1User) p1User.currentRoom = room.id;
+                if (p2User) p2User.currentRoom = room.id;
 
                 const startPayload = (playerId) => ({
                     type: 'game_start',

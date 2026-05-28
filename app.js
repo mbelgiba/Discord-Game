@@ -1,12 +1,25 @@
 // =============================================
-//  XO ARENA — CLIENT APP
+//  XO ARENA — CLIENT APP (WITH DMS, CALLS, MEDIA)
 // =============================================
 
 let socket = null;
 let currentUser = { id: null, username: '', tag: '', bio: '', wins: 0, losses: 0, draws: 0 };
-let pendingInviteFrom = null; // { id, name }
+let pendingInviteFrom = null; // { id, name, rematch, roomId }
 let activeRoom = { id: null, mySymbol: null, opponentName: null, myTurn: false };
 let onlineUserIds = new Set();
+let userNameToId = new Map(); // Full name to ID mapping
+
+// DM State
+let currentDmPartner = null; // { id, name }
+
+// Call State
+let localStream = null;
+let peerConnection = null;
+let activeCallPartner = null;
+let callType = null; // 'audio' or 'video'
+let incomingCallFrom = null;
+
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 // ===== TOAST SYSTEM =====
 function showToast(msg, type = 'info', duration = 3500) {
@@ -89,46 +102,30 @@ function onLogin() {
     showView('chat');
 }
 
-// ===== LOGOUT =====
 document.getElementById('logout-btn').addEventListener('click', () => {
     if (socket) socket.close();
     socket = null;
     currentUser = { id: null, username: '', tag: '', bio: '', wins: 0, losses: 0, draws: 0 };
     document.getElementById('app-container').style.display = 'none';
     document.getElementById('auth-screen').style.display = 'flex';
-    document.getElementById('auth-username').value = '';
-    document.getElementById('auth-password').value = '';
-    document.getElementById('auth-error').textContent = '';
-    document.getElementById('messages-container').innerHTML =
-        '<div class="message system"><span>👋 Добро пожаловать в <strong>XO Arena</strong>! Чтобы сыграть с другом — нажми 🎮 напротив его имени в списке справа.</span></div>';
 });
 
 // ===== VIEW SWITCHING =====
 function showView(view) {
     document.getElementById('view-chat').style.display = view === 'chat' ? 'flex' : 'none';
+    document.getElementById('view-dm').style.display = view === 'dm' ? 'flex' : 'none';
     document.getElementById('view-game').style.display = view === 'game' ? 'flex' : 'none';
+    
     document.getElementById('nav-chat').classList.toggle('active', view === 'chat');
+    
+    if (view !== 'dm') {
+        currentDmPartner = null;
+        document.querySelectorAll('.friends-list .nav-item').forEach(el => el.classList.remove('active'));
+    }
 }
 
 document.getElementById('nav-chat').addEventListener('click', () => showView('chat'));
-
-document.getElementById('leave-game-btn').addEventListener('click', () => {
-    if (activeRoom.id) {
-        socket.send(JSON.stringify({ type: 'game_leave', roomId: activeRoom.id }));
-        activeRoom = { id: null, mySymbol: null, opponentName: null, myTurn: false };
-    }
-    showLobby();
-    showView('chat');
-});
-
-document.getElementById('game-back-btn')?.addEventListener('click', () => {
-    if (activeRoom.id) {
-        socket.send(JSON.stringify({ type: 'game_leave', roomId: activeRoom.id }));
-        activeRoom = { id: null, mySymbol: null, opponentName: null, myTurn: false };
-    }
-    showLobby();
-    showView('chat');
-});
+document.getElementById('dm-back-btn').addEventListener('click', () => showView('chat'));
 
 // ===== WEBSOCKET =====
 function initWebSocket() {
@@ -143,9 +140,7 @@ function initWebSocket() {
     };
 
     socket.onclose = () => {
-        setTimeout(() => {
-            if (currentUser.id) initWebSocket();
-        }, 3000);
+        setTimeout(() => { if (currentUser.id) initWebSocket(); }, 3000);
     };
 }
 
@@ -159,7 +154,7 @@ function handleWsMessage(data) {
             updateUserLists(data.online, data.offline);
             break;
         case 'message':
-            appendMessage(data.user, data.text, data.userId === String(currentUser.id));
+            appendMessage('messages-container', data.user, data.text, data.userId === String(currentUser.id));
             break;
         case 'typing':
             document.getElementById('typing-indicator').textContent = `${data.user} печатает...`;
@@ -167,8 +162,46 @@ function handleWsMessage(data) {
         case 'stop_typing':
             document.getElementById('typing-indicator').textContent = '';
             break;
+            
+        // DM
+        case 'private_message':
+            if (currentDmPartner && (String(data.senderId) === String(currentDmPartner.id) || String(data.receiverId) === String(currentDmPartner.id))) {
+                appendDmMessage(data.senderName, data.content, data.msgType, String(data.senderId) === String(currentUser.id));
+            } else {
+                if (String(data.senderId) !== String(currentUser.id)) {
+                    showToast(`Новое сообщение от ${data.senderName}`, 'info');
+                }
+            }
+            break;
+        case 'private_typing':
+            if (currentDmPartner && String(data.senderId) === String(currentDmPartner.id)) {
+                document.getElementById('dm-typing-indicator').textContent = `${data.senderName} печатает...`;
+            }
+            break;
+        case 'private_stop_typing':
+            if (currentDmPartner && String(data.senderId) === String(currentDmPartner.id)) {
+                document.getElementById('dm-typing-indicator').textContent = '';
+            }
+            break;
 
-        // --- GAME INVITE ---
+        // CALLS
+        case 'call_offer':
+            handleCallOffer(data);
+            break;
+        case 'call_answer':
+            handleCallAnswer(data);
+            break;
+        case 'call_ice_candidate':
+            handleIceCandidate(data);
+            break;
+        case 'call_declined':
+            handleCallDeclined(data);
+            break;
+        case 'call_ended':
+            endCallLocally();
+            break;
+
+        // GAME INVITE
         case 'game_invite':
             pendingInviteFrom = { id: data.fromId, name: data.fromName };
             document.getElementById('invite-title').textContent = `${data.fromName} зовёт играть!`;
@@ -182,7 +215,7 @@ function handleWsMessage(data) {
             showToast(`${data.byName} отклонил приглашение`, 'error');
             break;
 
-        // --- GAME ---
+        // GAME
         case 'game_start':
             activeRoom.id = data.roomId;
             activeRoom.mySymbol = data.symbol;
@@ -212,30 +245,105 @@ function handleWsMessage(data) {
     }
 }
 
-// ===== INVITE MODAL =====
-document.getElementById('invite-accept-btn').addEventListener('click', () => {
-    document.getElementById('invite-modal').style.display = 'none';
-    if (!pendingInviteFrom) return;
+// ===== FRIENDS & DMS =====
+async function loadFriends() {
+    const res = await fetch(`/api/friends/${currentUser.id}`);
+    if (!res.ok) return;
+    const friends = await res.json();
+    const list = document.getElementById('friends-list');
+    list.innerHTML = friends.map(f => {
+        const full = `${f.username}#${f.tag}`;
+        userNameToId.set(full, String(f.id));
+        return `<li class="nav-item" data-id="${f.id}" data-full="${full}">👥 ${full}</li>`;
+    }).join('') || '<li style="color:var(--muted);font-size:13px;padding:8px">Список пуст</li>';
 
-    if (pendingInviteFrom.rematch) {
-        wsSend({ type: 'game_rematch_accept', roomId: pendingInviteFrom.roomId });
-    } else {
-        wsSend({ type: 'game_invite_accept', fromId: pendingInviteFrom.id });
+    list.querySelectorAll('.nav-item').forEach(li => {
+        li.addEventListener('click', () => openDM(li.dataset.id, li.dataset.full, li));
+    });
+}
+
+function openDM(id, fullName, el) {
+    document.querySelectorAll('.nav-list .nav-item').forEach(item => item.classList.remove('active'));
+    if (el) el.classList.add('active');
+    
+    currentDmPartner = { id, name: fullName };
+    document.getElementById('dm-partner-name').textContent = fullName;
+    showView('dm');
+    loadDmMessages(id);
+}
+
+async function loadDmMessages(friendId) {
+    const container = document.getElementById('dm-messages-container');
+    container.innerHTML = '';
+    const res = await fetch(`/api/messages/${currentUser.id}/${friendId}`);
+    if (res.ok) {
+        const msgs = await res.json();
+        msgs.forEach(m => {
+            const isOwn = String(m.sender_id) === String(currentUser.id);
+            const senderName = isOwn ? `${currentUser.username}#${currentUser.tag}` : `${m.username}#${m.tag}`;
+            appendDmMessage(senderName, m.content, m.msg_type, isOwn);
+        });
     }
-    pendingInviteFrom = null;
+}
+
+function appendDmMessage(user, content, type, isOwn) {
+    const container = document.getElementById('dm-messages-container');
+    const div = document.createElement('div');
+    div.className = `message${isOwn ? ' own' : ''}`;
+    
+    let innerHTML = `<div class="msg-author">${user}</div>`;
+    
+    if (type === 'text') {
+        innerHTML += escapeHtml(content);
+    } else if (type === 'gif') {
+        innerHTML += `<img src="${escapeHtml(content)}" class="message-gif" alt="GIF">`;
+    } else if (type === 'voice') {
+        innerHTML += `<audio controls class="message-audio" src="${content}"></audio>`;
+    }
+    
+    div.innerHTML = innerHTML;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+// Global Chat
+document.getElementById('send-btn').addEventListener('click', sendGlobalMessage);
+document.getElementById('message-input').addEventListener('keypress', e => { if (e.key === 'Enter') sendGlobalMessage(); });
+
+function sendGlobalMessage() {
+    const input = document.getElementById('message-input');
+    const text = input.value.trim();
+    if (!text || !socket) return;
+    wsSend({ type: 'message', text });
+    input.value = '';
+    wsSend({ type: 'stop_typing' });
+}
+
+// DM Chat
+document.getElementById('dm-send-btn').addEventListener('click', sendDmMessage);
+document.getElementById('dm-message-input').addEventListener('keypress', e => { if (e.key === 'Enter') sendDmMessage(); });
+
+let dmTypingTimeout;
+document.getElementById('dm-message-input').addEventListener('input', () => {
+    if (!currentDmPartner) return;
+    wsSend({ type: 'private_typing', targetId: currentDmPartner.id });
+    clearTimeout(dmTypingTimeout);
+    dmTypingTimeout = setTimeout(() => wsSend({ type: 'private_stop_typing', targetId: currentDmPartner.id }), 1500);
 });
 
-document.getElementById('invite-decline-btn').addEventListener('click', () => {
-    document.getElementById('invite-modal').style.display = 'none';
-    if (pendingInviteFrom && !pendingInviteFrom.rematch) {
-        wsSend({ type: 'game_invite_decline', fromId: pendingInviteFrom.id });
-    }
-    pendingInviteFrom = null;
-});
+function sendDmMessage() {
+    if (!currentDmPartner) return;
+    const input = document.getElementById('dm-message-input');
+    const text = input.value.trim();
+    if (!text) return;
+    wsSend({ type: 'private_message', targetId: currentDmPartner.id, content: text, msgType: 'text' });
+    input.value = '';
+    wsSend({ type: 'private_stop_typing', targetId: currentDmPartner.id });
+}
 
-// ===== CHAT =====
-function appendMessage(user, text, isOwn = false) {
-    const container = document.getElementById('messages-container');
+function escapeHtml(str) { return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function appendMessage(containerId, user, text, isOwn = false) {
+    const container = document.getElementById(containerId);
     const div = document.createElement('div');
     div.className = `message${isOwn ? ' own' : ''}`;
     div.innerHTML = `<div class="msg-author">${user}</div>${escapeHtml(text)}`;
@@ -243,29 +351,292 @@ function appendMessage(user, text, isOwn = false) {
     container.scrollTop = container.scrollHeight;
 }
 
-function escapeHtml(str) {
-    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
+// ===== VOICE MESSAGES =====
+let mediaRecorder;
+let audioChunks = [];
+let voiceTimerInterval;
+let voiceStartTime;
 
-document.getElementById('send-btn').addEventListener('click', sendMessage);
-document.getElementById('message-input').addEventListener('keypress', e => { if (e.key === 'Enter') sendMessage(); });
-
-let typingTimeout;
-document.getElementById('message-input').addEventListener('input', () => {
-    wsSend({ type: 'typing' });
-    clearTimeout(typingTimeout);
-    typingTimeout = setTimeout(() => wsSend({ type: 'stop_typing' }), 1500);
+document.getElementById('dm-voice-btn').addEventListener('click', async () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') return;
+    
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        
+        mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+        mediaRecorder.onstop = () => {
+            stream.getTracks().forEach(track => track.stop());
+            if (audioChunks.length === 0) return;
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            
+            // Convert to base64
+            const reader = new FileReader();
+            reader.readAsDataURL(audioBlob);
+            reader.onloadend = () => {
+                const base64data = reader.result;
+                if (currentDmPartner) {
+                    wsSend({ type: 'private_message', targetId: currentDmPartner.id, content: base64data, msgType: 'voice' });
+                }
+            };
+        };
+        
+        mediaRecorder.start();
+        document.getElementById('dm-message-input').style.display = 'none';
+        document.getElementById('dm-send-btn').style.display = 'none';
+        document.getElementById('dm-voice-btn').classList.add('recording');
+        document.getElementById('voice-recording-bar').style.display = 'flex';
+        
+        voiceStartTime = Date.now();
+        voiceTimerInterval = setInterval(() => {
+            const diff = Math.floor((Date.now() - voiceStartTime) / 1000);
+            const mins = Math.floor(diff / 60);
+            const secs = (diff % 60).toString().padStart(2, '0');
+            document.getElementById('voice-timer').textContent = `${mins}:${secs}`;
+        }, 1000);
+        
+    } catch (e) {
+        showToast('Не удалось получить доступ к микрофону', 'error');
+    }
 });
 
-function sendMessage() {
-    const input = document.getElementById('message-input');
-    const text = input.value.trim();
-    if (!text || !socket) return;
-    wsSend({ type: 'message', text });
-    input.value = '';
-    wsSend({ type: 'stop_typing' });
-    clearTimeout(typingTimeout);
+document.getElementById('voice-cancel-btn').addEventListener('click', stopRecording.bind(null, false));
+document.getElementById('voice-send-btn').addEventListener('click', stopRecording.bind(null, true));
+
+function stopRecording(sendData) {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        if (!sendData) audioChunks = []; // clear to prevent sending
+        mediaRecorder.stop();
+    }
+    clearInterval(voiceTimerInterval);
+    document.getElementById('dm-message-input').style.display = 'block';
+    document.getElementById('dm-send-btn').style.display = 'flex';
+    document.getElementById('dm-voice-btn').classList.remove('recording');
+    document.getElementById('voice-recording-bar').style.display = 'none';
+    document.getElementById('voice-timer').textContent = '0:00';
 }
+
+// ===== GIFS (Dummy data for demo, typically requires Giphy API) =====
+const sampleGifs = [
+    'https://media.giphy.com/media/ICOgUNjpvO0PC/giphy.gif',
+    'https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif',
+    'https://media.giphy.com/media/mlvseq9yvZhba/giphy.gif',
+    'https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif',
+    'https://media.giphy.com/media/l41lFw057lAJQMwg0/giphy.gif',
+    'https://media.giphy.com/media/3oriO0OEd9QIDdllqo/giphy.gif'
+];
+
+document.getElementById('dm-gif-btn').addEventListener('click', () => {
+    document.getElementById('gif-modal').style.display = 'flex';
+    renderGifs(sampleGifs);
+});
+document.getElementById('close-gif-btn').addEventListener('click', () => {
+    document.getElementById('gif-modal').style.display = 'none';
+});
+
+function renderGifs(urls) {
+    const container = document.getElementById('gif-results');
+    container.innerHTML = '';
+    urls.forEach(url => {
+        const img = document.createElement('img');
+        img.src = url;
+        img.className = 'gif-item';
+        img.onclick = () => {
+            if (currentDmPartner) {
+                wsSend({ type: 'private_message', targetId: currentDmPartner.id, content: url, msgType: 'gif' });
+            }
+            document.getElementById('gif-modal').style.display = 'none';
+        };
+        container.appendChild(img);
+    });
+}
+
+// ===== CALLS (WebRTC) =====
+document.getElementById('dm-call-audio-btn').addEventListener('click', () => startCall('audio'));
+document.getElementById('dm-call-video-btn').addEventListener('click', () => startCall('video'));
+
+async function startCall(type) {
+    if (!currentDmPartner) return;
+    callType = type;
+    activeCallPartner = currentDmPartner;
+    
+    showCallUI(true, type);
+    showToast('Звоним...', 'info');
+
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type === 'video' });
+        document.getElementById('local-video').srcObject = localStream;
+        
+        peerConnection = new RTCPeerConnection(rtcConfig);
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+        
+        peerConnection.onicecandidate = e => {
+            if (e.candidate) {
+                wsSend({ type: 'call_ice_candidate', targetId: activeCallPartner.id, candidate: e.candidate });
+            }
+        };
+        
+        peerConnection.ontrack = e => {
+            document.getElementById('remote-video').srcObject = e.streams[0];
+        };
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        wsSend({ type: 'call_offer', targetId: activeCallPartner.id, offer, callType: type });
+        
+    } catch (e) {
+        showToast('Ошибка доступа к медиаустройствам', 'error');
+        endCallLocally();
+    }
+}
+
+function handleCallOffer(data) {
+    if (activeCallPartner) {
+        // Already in call, reject
+        wsSend({ type: 'call_decline', targetId: data.fromId });
+        return;
+    }
+    incomingCallFrom = data;
+    document.getElementById('call-incoming-title').textContent = data.callType === 'video' ? 'Видеозвонок' : 'Аудиозвонок';
+    document.getElementById('call-incoming-text').textContent = `От ${data.fromName}`;
+    document.getElementById('call-incoming-modal').style.display = 'flex';
+}
+
+document.getElementById('call-accept-btn').addEventListener('click', async () => {
+    document.getElementById('call-incoming-modal').style.display = 'none';
+    if (!incomingCallFrom) return;
+    
+    activeCallPartner = { id: incomingCallFrom.fromId, name: incomingCallFrom.fromName };
+    callType = incomingCallFrom.callType;
+    showCallUI(false, callType);
+
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: callType === 'video' });
+        document.getElementById('local-video').srcObject = localStream;
+
+        peerConnection = new RTCPeerConnection(rtcConfig);
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+        peerConnection.onicecandidate = e => {
+            if (e.candidate) wsSend({ type: 'call_ice_candidate', targetId: activeCallPartner.id, candidate: e.candidate });
+        };
+        
+        peerConnection.ontrack = e => {
+            document.getElementById('remote-video').srcObject = e.streams[0];
+        };
+
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(incomingCallFrom.offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        wsSend({ type: 'call_answer', targetId: activeCallPartner.id, answer });
+        
+        startCallTimer();
+    } catch (e) {
+        showToast('Ошибка доступа к камере/микрофону', 'error');
+        wsSend({ type: 'call_decline', targetId: incomingCallFrom.fromId });
+        endCallLocally();
+    }
+    incomingCallFrom = null;
+});
+
+document.getElementById('call-decline-btn').addEventListener('click', () => {
+    document.getElementById('call-incoming-modal').style.display = 'none';
+    if (incomingCallFrom) {
+        wsSend({ type: 'call_decline', targetId: incomingCallFrom.fromId });
+        incomingCallFrom = null;
+    }
+});
+
+async function handleCallAnswer(data) {
+    if (peerConnection) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        startCallTimer();
+    }
+}
+
+async function handleIceCandidate(data) {
+    if (peerConnection) {
+        try { await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch(e){}
+    }
+}
+
+function handleCallDeclined(data) {
+    showToast('Звонок отклонен', 'error');
+    endCallLocally();
+}
+
+document.getElementById('call-end-btn').addEventListener('click', () => {
+    if (activeCallPartner) wsSend({ type: 'call_end', targetId: activeCallPartner.id });
+    endCallLocally();
+});
+
+let callTimerInterval;
+let callStartTime;
+function startCallTimer() {
+    callStartTime = Date.now();
+    callTimerInterval = setInterval(() => {
+        const diff = Math.floor((Date.now() - callStartTime) / 1000);
+        const mins = Math.floor(diff / 60).toString().padStart(2, '0');
+        const secs = (diff % 60).toString().padStart(2, '0');
+        document.getElementById('call-timer').textContent = `${mins}:${secs}`;
+    }, 1000);
+}
+
+function showCallUI(isCaller, type) {
+    document.getElementById('call-overlay').style.display = 'flex';
+    document.getElementById('call-partner-name').textContent = activeCallPartner.name;
+    document.getElementById('call-timer').textContent = isCaller ? 'Вызов...' : 'Соединение...';
+    
+    if (type === 'audio') {
+        document.getElementById('call-audio-avatar').classList.add('active');
+        document.getElementById('remote-video').style.display = 'none';
+        document.getElementById('local-video').style.display = 'none';
+        document.getElementById('call-toggle-camera').style.display = 'none';
+    } else {
+        document.getElementById('call-audio-avatar').classList.remove('active');
+        document.getElementById('remote-video').style.display = 'block';
+        document.getElementById('local-video').style.display = 'block';
+        document.getElementById('call-toggle-camera').style.display = 'flex';
+    }
+}
+
+function endCallLocally() {
+    if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+    }
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    clearInterval(callTimerInterval);
+    document.getElementById('call-overlay').style.display = 'none';
+    document.getElementById('remote-video').srcObject = null;
+    document.getElementById('local-video').srcObject = null;
+    activeCallPartner = null;
+}
+
+// Control toggles
+document.getElementById('call-toggle-mic').addEventListener('click', (e) => {
+    if (localStream) {
+        const audioTrack = localStream.getAudioTracks()[0];
+        if (audioTrack) {
+            audioTrack.enabled = !audioTrack.enabled;
+            e.currentTarget.classList.toggle('active', audioTrack.enabled);
+        }
+    }
+});
+
+document.getElementById('call-toggle-camera').addEventListener('click', (e) => {
+    if (localStream && callType === 'video') {
+        const videoTrack = localStream.getVideoTracks()[0];
+        if (videoTrack) {
+            videoTrack.enabled = !videoTrack.enabled;
+            e.currentTarget.classList.toggle('active', videoTrack.enabled);
+        }
+    }
+});
 
 // ===== USER LISTS =====
 function updateUserLists(online, offline) {
@@ -274,7 +645,6 @@ function updateUserLists(online, offline) {
     const offlineEl = document.getElementById('offline-users');
     const myFull = `${currentUser.username}#${currentUser.tag}`;
 
-    // Parse online users to extract IDs from server broadcast
     onlineEl.innerHTML = online.map(fullName => {
         const isMe = fullName === myFull;
         return `
@@ -292,31 +662,22 @@ function updateUserLists(online, offline) {
         </li>`
     ).join('');
 
-    const count = online.length;
-    document.getElementById('online-count').textContent = `${count} онлайн`;
+    document.getElementById('online-count').textContent = `${online.length} онлайн`;
 
-    // Attach invite buttons
     onlineEl.querySelectorAll('.invite-game-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            const targetFull = btn.dataset.full;
-            inviteUserByName(targetFull);
+            inviteUserByName(btn.dataset.full);
         });
     });
 }
 
-// We need to look up user ID by name — server knows IDs, we need to send by ID
-// We'll resolve via the friends list cache or a simple lookup request
-const userNameToId = new Map(); // populated when we get friends or via profile search
-
 function inviteUserByName(fullName) {
-    // Try to find ID from friends cache
     const cached = userNameToId.get(fullName);
     if (cached) {
         wsSend({ type: 'game_invite', targetId: cached });
         showToast(`Приглашение отправлено → ${fullName}`, 'info');
     } else {
-        // Lookup by username#tag
         const [uname, utag] = fullName.split('#');
         fetch(`/api/user/find?username=${encodeURIComponent(uname)}&tag=${encodeURIComponent(utag)}`)
             .then(r => r.json())
@@ -328,24 +689,65 @@ function inviteUserByName(fullName) {
                 } else {
                     showToast('Не удалось найти игрока', 'error');
                 }
-            })
-            .catch(() => showToast('Ошибка поиска игрока', 'error'));
+            }).catch(() => showToast('Ошибка поиска игрока', 'error'));
     }
 }
 
-// ===== FRIENDS =====
-async function loadFriends() {
-    const res = await fetch(`/api/friends/${currentUser.id}`);
-    if (!res.ok) return;
-    const friends = await res.json();
-    const list = document.getElementById('friends-list');
-    list.innerHTML = friends.map(f => {
-        const full = `${f.username}#${f.tag}`;
-        userNameToId.set(full, String(f.id));
-        return `<li class="nav-item" data-id="${f.id}" data-full="${full}">👥 ${full}</li>`;
-    }).join('') || '<li style="color:var(--muted);font-size:13px;padding:8px">Список пуст</li>';
-}
+// ===== PROFILE =====
+document.getElementById('open-profile-btn').addEventListener('click', async () => {
+    document.getElementById('modal-username-display').textContent = `${currentUser.username}#${currentUser.tag}`;
+    document.getElementById('modal-avatar-badge').textContent = currentUser.username[0].toUpperCase();
+    document.getElementById('profile-msg').textContent = '';
 
+    const res = await fetch(`/api/profile/${currentUser.id}`);
+    if (res.ok) {
+        const d = await res.json();
+        currentUser = { ...currentUser, ...d };
+        document.getElementById('profile-bio-input').value = d.bio || '';
+        document.getElementById('stat-wins').textContent = d.wins || 0;
+        document.getElementById('stat-losses').textContent = d.losses || 0;
+        document.getElementById('stat-draws').textContent = d.draws || 0;
+    }
+    document.getElementById('profile-modal').style.display = 'flex';
+});
+
+document.getElementById('close-profile-btn').addEventListener('click', () => { document.getElementById('profile-modal').style.display = 'none'; });
+
+document.getElementById('save-profile-btn').addEventListener('click', async () => {
+    const bio = document.getElementById('profile-bio-input').value.trim();
+    const res = await fetch('/api/profile/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: currentUser.id, bio })
+    });
+    if (res.ok) {
+        currentUser.bio = bio;
+        document.getElementById('profile-msg').textContent = 'Сохранено!';
+        setTimeout(() => { document.getElementById('profile-modal').style.display = 'none'; }, 1200);
+    }
+});
+
+// Invite modals
+document.getElementById('invite-accept-btn').addEventListener('click', () => {
+    document.getElementById('invite-modal').style.display = 'none';
+    if (!pendingInviteFrom) return;
+    if (pendingInviteFrom.rematch) {
+        wsSend({ type: 'game_rematch_accept', roomId: pendingInviteFrom.roomId });
+    } else {
+        wsSend({ type: 'game_invite_accept', fromId: pendingInviteFrom.id });
+    }
+    pendingInviteFrom = null;
+});
+
+document.getElementById('invite-decline-btn').addEventListener('click', () => {
+    document.getElementById('invite-modal').style.display = 'none';
+    if (pendingInviteFrom && !pendingInviteFrom.rematch) {
+        wsSend({ type: 'game_invite_decline', fromId: pendingInviteFrom.id });
+    }
+    pendingInviteFrom = null;
+});
+
+// Add friend
 document.getElementById('add-friend-btn').addEventListener('click', addFriend);
 document.getElementById('friend-search-input').addEventListener('keypress', e => { if (e.key === 'Enter') addFriend(); });
 
@@ -372,60 +774,16 @@ async function addFriend() {
     }
 }
 
-// ===== PROFILE MODAL =====
-document.getElementById('open-profile-btn').addEventListener('click', async () => {
-    document.getElementById('modal-username-display').textContent = `${currentUser.username}#${currentUser.tag}`;
-    document.getElementById('modal-avatar-badge').textContent = currentUser.username[0].toUpperCase();
-    document.getElementById('profile-msg').textContent = '';
-
-    const res = await fetch(`/api/profile/${currentUser.id}`);
-    if (res.ok) {
-        const d = await res.json();
-        currentUser = { ...currentUser, ...d };
-        document.getElementById('profile-bio-input').value = d.bio || '';
-        document.getElementById('stat-wins').textContent = d.wins || 0;
-        document.getElementById('stat-losses').textContent = d.losses || 0;
-        document.getElementById('stat-draws').textContent = d.draws || 0;
-    }
-    document.getElementById('profile-modal').style.display = 'flex';
-});
-
-document.getElementById('close-profile-btn').addEventListener('click', () => {
-    document.getElementById('profile-modal').style.display = 'none';
-});
-
-document.getElementById('save-profile-btn').addEventListener('click', async () => {
-    const bio = document.getElementById('profile-bio-input').value.trim();
-    const res = await fetch('/api/profile/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: currentUser.id, bio })
-    });
-    if (res.ok) {
-        currentUser.bio = bio;
-        document.getElementById('profile-msg').textContent = 'Сохранено!';
-        setTimeout(() => {
-            document.getElementById('profile-msg').textContent = '';
-            document.getElementById('profile-modal').style.display = 'none';
-        }, 1200);
-    }
-});
-
 // ===== GAME =====
-function showLobby() {
-    document.getElementById('game-lobby').style.display = 'flex';
-    document.getElementById('game-active').style.display = 'none';
-    document.getElementById('game-actions').style.display = 'none';
-}
-
 function startGame(data) {
     showView('game');
     document.getElementById('game-lobby').style.display = 'none';
     document.getElementById('game-active').style.display = 'flex';
     document.getElementById('game-actions').style.display = 'none';
     document.getElementById('rematch-btn').style.display = '';
+    document.getElementById('rematch-btn').disabled = false;
+    document.getElementById('rematch-btn').textContent = '🔄 Реванш';
 
-    // Set symbols
     const mySymBadge = document.getElementById('my-symbol-badge');
     const oppSymBadge = document.getElementById('opp-symbol-badge');
     mySymBadge.textContent = data.symbol;
@@ -434,12 +792,11 @@ function startGame(data) {
     oppSymBadge.textContent = oppSym;
     oppSymBadge.className = `player-symbol ${oppSym.toLowerCase()}`;
 
-    document.getElementById('player-me-name').textContent = `${currentUser.username}`;
+    document.getElementById('player-me-name').textContent = currentUser.username;
     document.getElementById('player-opp-name').textContent = data.opponentName?.split('#')[0] || 'Соперник';
 
     resetBoard(data.board);
     updateTurnUI(data.yourTurn, data.symbol);
-
     showToast(`Игра началась! Вы играете за ${data.symbol}`, 'success');
 }
 
@@ -448,9 +805,7 @@ function resetBoard(board = Array(9).fill('')) {
     cells.forEach((cell, i) => {
         cell.textContent = board[i] || '';
         cell.className = 'cell';
-        if (board[i]) {
-            cell.classList.add(board[i].toLowerCase(), 'taken');
-        }
+        if (board[i]) cell.classList.add(board[i].toLowerCase(), 'taken');
         cell.onclick = () => handleCellClick(i);
     });
 }
@@ -463,46 +818,31 @@ function handleCellClick(idx) {
 }
 
 function handleGameUpdate(data) {
-    const { board, currentTurn, result, yourTurn } = data;
+    const { board, result, yourTurn } = data;
     activeRoom.myTurn = yourTurn;
 
-    // Update board
     const cells = document.querySelectorAll('.cell');
     cells.forEach((cell, i) => {
         if (board[i] && !cell.classList.contains('taken')) {
             cell.textContent = board[i];
             cell.className = `cell taken ${board[i].toLowerCase()} pop-in`;
-            // remove animation class after it's done
             setTimeout(() => cell.classList.remove('pop-in'), 300);
         }
     });
 
     if (result) {
-        // Game over
         activeRoom.myTurn = false;
         if (result.winner === 'draw') {
             setStatusBanner('🤝 Ничья!', '#c084fc');
-            showToast('Ничья!', 'info');
         } else {
             const iWon = result.winner === activeRoom.mySymbol;
-            result.line.forEach(idx => {
-                cells[idx].classList.add('winning');
-            });
-            if (iWon) {
-                setStatusBanner('🏆 Вы победили!', '#4ade80');
-                showToast('Вы победили! 🏆', 'success');
-            } else {
-                setStatusBanner('💀 Вы проиграли', '#f87171');
-                showToast('Вы проиграли...', 'error');
-            }
+            result.line.forEach(idx => cells[idx].classList.add('winning'));
+            if (iWon) setStatusBanner('🏆 Вы победили!', '#4ade80');
+            else setStatusBanner('💀 Вы проиграли', '#f87171');
         }
-        // Refresh stats
-        fetch(`/api/profile/${currentUser.id}`).then(r => r.json()).then(d => {
-            currentUser = { ...currentUser, ...d };
-        });
-
+        fetch(`/api/profile/${currentUser.id}`).then(r => r.json()).then(d => { currentUser = { ...currentUser, ...d }; });
         document.getElementById('game-actions').style.display = 'flex';
-        activeRoom.id = null; // room closed
+        // DO NOT null activeRoom.id here so rematch works
     } else {
         updateTurnUI(yourTurn, activeRoom.mySymbol);
     }
@@ -513,10 +853,8 @@ function updateTurnUI(myTurn, mySymbol) {
     const color = myTurn ? (mySymbol === 'X' ? '#f87171' : '#60a5fa') : '#7c6fa0';
     setStatusBanner(statusText, color);
 
-    const meCard = document.getElementById('player-me-card');
-    const oppCard = document.getElementById('player-opp-card');
-    meCard.classList.toggle('active-turn', myTurn);
-    oppCard.classList.toggle('active-turn', !myTurn);
+    document.getElementById('player-me-card').classList.toggle('active-turn', myTurn);
+    document.getElementById('player-opp-card').classList.toggle('active-turn', !myTurn);
 }
 
 function setStatusBanner(text, color) {
@@ -526,7 +864,6 @@ function setStatusBanner(text, color) {
     dot.style.boxShadow = `0 0 8px ${color}`;
 }
 
-// Rematch button
 document.getElementById('rematch-btn').addEventListener('click', () => {
     if (activeRoom.id) {
         wsSend({ type: 'game_rematch', roomId: activeRoom.id });
@@ -535,3 +872,16 @@ document.getElementById('rematch-btn').addEventListener('click', () => {
         document.getElementById('rematch-btn').textContent = '⏳ Ожидание...';
     }
 });
+
+function leaveGame() {
+    if (activeRoom.id) {
+        wsSend({ type: 'game_leave', roomId: activeRoom.id });
+        activeRoom = { id: null, mySymbol: null, opponentName: null, myTurn: false };
+    }
+    document.getElementById('game-lobby').style.display = 'flex';
+    document.getElementById('game-active').style.display = 'none';
+    document.getElementById('game-actions').style.display = 'none';
+    showView('chat');
+}
+document.getElementById('leave-game-btn').addEventListener('click', leaveGame);
+document.getElementById('game-back-btn')?.addEventListener('click', leaveGame);
